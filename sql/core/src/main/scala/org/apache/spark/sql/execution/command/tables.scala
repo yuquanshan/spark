@@ -187,11 +187,10 @@ case class AlterTableRenameCommand(
 */
 case class AlterTableAddColumnsCommand(
     table: TableIdentifier,
-    columns: Seq[StructField]) extends RunnableCommand {
+    colsToAdd: Seq[StructField]) extends RunnableCommand {
   override def run(sparkSession: SparkSession): Seq[Row] = {
     val catalog = sparkSession.sessionState.catalog
     val catalogTable = verifyAlterTableAddColumn(catalog, table)
-
     try {
       sparkSession.catalog.uncacheTable(table.quotedString)
     } catch {
@@ -199,12 +198,7 @@ case class AlterTableAddColumnsCommand(
         log.warn(s"Exception when attempting to uncache table ${table.quotedString}", e)
     }
     catalog.refreshTable(table)
-
-    // make sure any partition columns are at the end of the fields
-    val reorderedSchema = catalogTable.dataSchema ++ columns ++ catalogTable.partitionSchema
-    catalog.alterTableSchema(
-      table, catalogTable.schema.copy(fields = reorderedSchema.toArray))
-
+    catalog.alterTableDataSchema(table, StructType(catalogTable.dataSchema ++ colsToAdd))
     Seq.empty[Row]
   }
 
@@ -339,7 +333,7 @@ case class LoadDataCommand(
         uri
       } else {
         val uri = new URI(path)
-        if (uri.getScheme() != null && uri.getAuthority() != null) {
+        val hdfsUri = if (uri.getScheme() != null && uri.getAuthority() != null) {
           uri
         } else {
           // Follow Hive's behavior:
@@ -379,6 +373,13 @@ case class LoadDataCommand(
           }
           new URI(scheme, authority, absolutePath, uri.getQuery(), uri.getFragment())
         }
+        val hadoopConf = sparkSession.sessionState.newHadoopConf()
+        val srcPath = new Path(hdfsUri)
+        val fs = srcPath.getFileSystem(hadoopConf)
+        if (!fs.exists(srcPath)) {
+          throw new AnalysisException(s"LOAD DATA input path does not exist: $path")
+        }
+        hdfsUri
       }
 
     if (partition.nonEmpty) {
